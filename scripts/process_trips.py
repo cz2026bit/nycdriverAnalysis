@@ -1,9 +1,10 @@
 """处理 TLC 高频网约车 (HVFHV) 行程数据。
 
-按 接单区域 × 星期几 × 小时 聚合，输出前端所需的紧凑 JSON：
-  - n:   订单数
-  - avg: 平均司机收入 (driver_pay + tips)
-  - big: 「大单」数（司机收入 >= 全市前10%阈值）
+按 接单区域 × 星期几 × 小时 聚合，输出前端所需的紧凑 JSON。
+每个格子为 [n, avg, big_p90, big_70, big_100]：
+  - n:    订单数
+  - avg:  平均司机收入 (driver_pay + tips)
+  - big_*: 收入达到各档阈值的订单数（P90 动态阈值 / $70 / $100）
 
 用法: python scripts/process_trips.py data/fhvhv_2026-05.parquet
 """
@@ -29,14 +30,16 @@ def main(parquet_path: str):
     df["earn"] = df["driver_pay"].fillna(0) + df["tips"].fillna(0)
     df = df[(df["earn"] > 0) & df["PULocationID"].between(1, 263)]
 
-    # 大单阈值 = 全市司机单笔收入的前 10%（P90）
-    threshold = round(float(df["earn"].quantile(0.90)), 2)
-    print(f"大单阈值 (P90): ${threshold}")
+    # 大单阈值分三档：全市 P90（动态）、$70、$100
+    p90 = round(float(df["earn"].quantile(0.90)), 2)
+    thresholds = [p90, 70.0, 100.0]
+    print(f"大单阈值: P90=${p90} / $70 / $100")
 
     dt = df["pickup_datetime"]
     df["dow"] = dt.dt.dayofweek.astype("int8")   # 0=周一
     df["hour"] = dt.dt.hour.astype("int8")
-    df["big"] = (df["earn"] >= threshold)
+    for i, t in enumerate(thresholds):
+        df[f"big{i}"] = (df["earn"] >= t)
 
     # 当月每个星期几出现的天数（用于换算「每小时大单数」）
     days_per_dow = (
@@ -45,16 +48,17 @@ def main(parquet_path: str):
     )
 
     g = df.groupby(["PULocationID", "dow", "hour"]).agg(
-        n=("earn", "size"), avg=("earn", "mean"), big=("big", "sum")
+        n=("earn", "size"), avg=("earn", "mean"),
+        big0=("big0", "sum"), big1=("big1", "sum"), big2=("big2", "sum"),
     ).reset_index()
 
     stats = {}
     for zone, zg in g.groupby("PULocationID"):
-        grid = [[[0, 0, 0]] * 24 for _ in range(7)]
-        grid = [[list(c) for c in row] for row in grid]
+        grid = [[[0, 0, 0, 0, 0] for _ in range(24)] for _ in range(7)]
         for _, r in zg.iterrows():
             grid[int(r["dow"])][int(r["hour"])] = [
-                int(r["n"]), round(float(r["avg"]), 2), int(r["big"])
+                int(r["n"]), round(float(r["avg"]), 2),
+                int(r["big0"]), int(r["big1"]), int(r["big2"]),
             ]
         stats[str(int(zone))] = grid
 
@@ -62,7 +66,7 @@ def main(parquet_path: str):
     out = {
         "meta": {
             "month": month,
-            "threshold": threshold,
+            "thresholds": thresholds,
             "days_per_dow": days_per_dow,
             "total_trips": int(len(df)),
         },

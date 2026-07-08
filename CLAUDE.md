@@ -30,13 +30,17 @@ curl -o data/fhvhv_YYYY-MM.parquet "https://d37ci6vzurychx.cloudfront.net/trip-d
 
 1. **`scripts/make_zones_geojson.py`** — TLC 官方 taxi_zones shapefile（EPSG:2263）
    → Douglas-Peucker 简化 → WGS84 GeoJSON（~0.3MB，含 id/zone/borough 属性）。
-2. **`scripts/process_trips.py`** — 500MB parquet（~2200万行）→ `stats.json`（~0.6MB）。
-   核心口径：**earn = driver_pay + tips**；**大单 = earn ≥ 全市 P90**（阈值写进 meta）。
-   输出结构：`stats[zoneId][dow][hour] = [订单数, 平均收入, 大单数]`，dow 0=周一；
-   `meta.days_per_dow` 用于把月度计数换算成「每小时大单数」。
-3. **`web/index.html`** — 单文件前端（Leaflet 从 `web/lib/` 本地加载，地图瓦片用 CARTO CDN）。
+2. **`scripts/process_trips.py`** — 500MB parquet（~2200万行）→ `stats.json`（~0.8MB）。
+   核心口径：**earn = driver_pay + tips**；大单分三档阈值（全市 P90 动态 / $70 / $100，
+   写进 `meta.thresholds`）。输出结构：
+   `stats[zoneId][dow][hour] = [订单数, 平均收入, 大单数P90, 大单数$70, 大单数$100]`，
+   dow 0=周一；`meta.days_per_dow` 用于把月度计数换算成「每小时大单数」。
+3. **`scripts/fetch_hotels.py`** — Overpass API（多镜像轮询，需 User-Agent）拉取
+   OSM 酒店 POI → 射线法归属到 taxi zone → `web/data/hotels.json`。
+4. **`web/index.html`** — 单文件前端（Leaflet 从 `web/lib/` 本地加载，地图瓦片用 CARTO CDN）。
    默认时段取 **America/New_York 当前时间**（不是本机时区）；着色是当前时段内
    7 档分位数分箱（相对比较，非固定刻度）；样本 <10 单（MIN_TRIPS）的格子置灰。
+   酒店图层开启时 Top 榜切换为酒店排名（值 = 酒店所在区域的当前指标）。
 
 ## 约定
 

@@ -139,13 +139,22 @@
     </div>
   </div>
 
+  <div class="row">
+    <label class="small">大单标准</label>
+    <div class="seg" id="tierSeg">
+      <button data-t="0" class="on">前10%</button>
+      <button data-t="1">$70+</button>
+      <button data-t="2">$100+</button>
+    </div>
+  </div>
+
   <div class="legend">
     <div class="bins" id="legendBins"></div>
     <div class="lab"><span id="legendLo"></span><span id="legendHi"></span></div>
   </div>
 
   <div class="top10">
-    <h2>当前时段 Top 10 区域</h2>
+    <h2 id="topTitle">当前时段 Top 10 区域</h2>
     <ol id="topList"></ol>
   </div>
 
@@ -153,6 +162,7 @@
 </div>
 
 <div class="toggles">
+  <button id="hotelBtn" title="显示/隐藏酒店">🏨 酒店</button>
   <button id="themeBtn" title="切换深浅模式">🌙</button>
 </div>
 
@@ -165,16 +175,23 @@ const RAMP_DARK  = ['#0d366b','#184f95','#1c5cab','#256abf','#2a78d6','#5598e7',
 const NO_DATA_LIGHT = '#eceae4', NO_DATA_DARK = '#242423';
 
 const DOW_NAMES = ['周一','周二','周三','周四','周五','周六','周日'];
+const fmtPct = v => { const x = v * 100; return (x < 10 ? x.toFixed(1) : x.toFixed(0)) + '%'; };
 const METRIC_DEFS = {
   bigPerHour: { name: '每小时大单数', fmt: v => v.toFixed(1) + ' 单', desc: '该时段该区域平均每小时产生的大单数量（供给热度）' },
-  bigProb:    { name: '大单概率',     fmt: v => (v*100).toFixed(0) + '%', desc: '在该区域接到的订单中属于大单的比例' },
+  bigProb:    { name: '大单概率',     fmt: fmtPct, desc: '在该区域接到的订单中属于大单的比例' },
   avg:        { name: '平均收入',     fmt: v => '$' + v.toFixed(0), desc: '该时段该区域每单司机平均到手收入（含小费）' },
 };
 const MIN_TRIPS = 10; // 样本太少的格子不着色
 
 let stats = null, meta = null, geoLayer = null, map = null;
-let state = { dow: 0, hour: 0, metric: 'bigPerHour', theme: 'light' };
+let hotels = [], hotelLayer = null, hotelMarkers = {};
+let state = { dow: 0, hour: 0, metric: 'bigPerHour', tier: 0, hotels: false, theme: 'light' };
 let tiles = null, breaks = [];
+
+function tierLabel() {
+  const t = meta.thresholds[state.tier];
+  return state.tier === 0 ? `≥ $${t}（全市前10%）` : `≥ $${t}`;
+}
 
 // ---------- 纽约当前时间 ----------
 function nycNow() {
@@ -188,7 +205,8 @@ function nycNow() {
 function zoneValue(zid, dow, hour, metric) {
   const g = stats[zid];
   if (!g) return null;
-  const [n, avg, big] = g[dow][hour];
+  const cell = g[dow][hour];
+  const n = cell[0], avg = cell[1], big = cell[2 + state.tier];
   if (n < MIN_TRIPS) return null;
   if (metric === 'bigProb') return big / n;
   if (metric === 'avg') return avg;
@@ -247,13 +265,38 @@ function renderLegend() {
 }
 
 function renderTop10(byZone) {
+  const fmt = METRIC_DEFS[state.metric].fmt;
+  const listEl = document.getElementById('topList');
+  const titleEl = document.getElementById('topTitle');
+
+  if (state.hotels) {
+    // 酒店模式：按酒店所在区域的当前指标排序
+    titleEl.textContent = '当前时段 Top 15 酒店';
+    const items = hotels
+      .map(h => ({ h, v: byZone[String(h.zone)] }))
+      .filter(it => it.v !== null && it.v !== undefined && it.v > 0)
+      .sort((a,b) => b.v - a.v)
+      .slice(0, 15);
+    listEl.innerHTML = items.map((it,i) =>
+      `<li data-i="${i}"><span class="rank">${i+1}</span><span class="z" title="${it.h.name}">${it.h.name}</span><span class="v">${fmt(it.v)}</span></li>`).join('');
+    listEl.querySelectorAll('li').forEach(li => {
+      li.onclick = () => {
+        const it = items[+li.dataset.i];
+        map.setView([it.h.lat, it.h.lon], 15);
+        const m = hotelMarkers[it.h.name];
+        if (m) m.openTooltip();
+      };
+    });
+    return;
+  }
+
+  titleEl.textContent = '当前时段 Top 10 区域';
   const items = [];
   geoLayer.eachLayer(l => {
     const p = l.feature.properties, v = byZone[String(p.id)];
     if (v !== null && v !== undefined && v > 0) items.push({ v, p, l });
   });
   items.sort((a,b) => b.v - a.v);
-  const fmt = METRIC_DEFS[state.metric].fmt;
   document.getElementById('topList').innerHTML = items.slice(0,10).map((it,i) =>
     `<li data-i="${i}"><span class="rank">${i+1}</span><span class="z">${it.p.zone}</span><span class="v">${fmt(it.v)}</span></li>`).join('');
   const top = items.slice(0,10);
@@ -272,25 +315,58 @@ function renderLabels() {
     `${DOW_NAMES[state.dow]} ${String(state.hour).padStart(2,'0')}:00–${String((state.hour+1)%24).padStart(2,'0')}:00`;
   document.querySelectorAll('#dowSeg button').forEach((b,i) => b.classList.toggle('on', i === state.dow));
   document.querySelectorAll('#metricSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === state.metric));
+  document.querySelectorAll('#tierSeg button').forEach(b => b.classList.toggle('on', +b.dataset.t === state.tier));
   document.getElementById('hourSlider').value = state.hour;
   document.getElementById('footNote').innerHTML =
-    `<b>${d.name}</b>：${d.desc}。<br>大单 = 司机单笔到手收入（车费+小费）≥ $${meta.threshold}` +
-    `（全市前10%）。数据：NYC TLC 高频网约车行程记录 ${meta.month}，共 ${(meta.total_trips/1e6).toFixed(1)}M 单。灰色 = 该时段样本不足。`;
+    `<b>${d.name}</b>：${d.desc}。<br>大单 = 司机单笔到手收入（车费+小费）${tierLabel()}` +
+    `。数据：NYC TLC 高频网约车行程记录 ${meta.month}，共 ${(meta.total_trips/1e6).toFixed(1)}M 单。灰色 = 该时段样本不足。`;
 }
 
-function tipHtml(props) {
-  const g = stats[String(props.id)];
-  if (!g) return `<b>${props.zone}</b><div class="boro">${props.borough} · 无数据</div>`;
-  const [n, avg, big] = g[state.dow][state.hour];
+function zoneRows(zid) {
+  const g = stats[String(zid)];
+  if (!g) return null;
+  const cell = g[state.dow][state.hour];
+  const n = cell[0], avg = cell[1], big = cell[2 + state.tier];
+  if (n < MIN_TRIPS) return `<div style="font-size:12px;color:var(--text-muted)">该时段样本不足</div>`;
   const days = meta.days_per_dow[state.dow] || 1;
-  const rows = n >= MIN_TRIPS ? `
+  return `
     <table>
       <tr><td>每小时订单量</td><td class="v">${(n/days).toFixed(0)} 单</td></tr>
       <tr><td>每小时大单数</td><td class="v">${(big/days).toFixed(1)} 单</td></tr>
-      <tr><td>大单概率</td><td class="v">${(big/n*100).toFixed(0)}%</td></tr>
+      <tr><td>大单概率</td><td class="v">${fmtPct(big/n)}</td></tr>
       <tr><td>平均每单收入</td><td class="v">$${avg.toFixed(2)}</td></tr>
-    </table>` : `<div style="font-size:12px;color:var(--text-muted)">该时段样本不足</div>`;
+    </table>`;
+}
+
+function tipHtml(props) {
+  const rows = zoneRows(props.id);
+  if (rows === null) return `<b>${props.zone}</b><div class="boro">${props.borough} · 无数据</div>`;
   return `<b>${props.zone}</b><div class="boro">${props.borough} · ${DOW_NAMES[state.dow]} ${String(state.hour).padStart(2,'0')}:00</div>${rows}`;
+}
+
+function hotelTipHtml(h, zoneName) {
+  const rows = zoneRows(h.zone) ?? '<div style="font-size:12px;color:var(--text-muted)">无数据</div>';
+  return `<b>🏨 ${h.name}</b><div class="boro">${zoneName} · ${DOW_NAMES[state.dow]} ${String(state.hour).padStart(2,'0')}:00（所在区域数据）</div>${rows}`;
+}
+
+function buildHotelLayer(zoneNames) {
+  hotelLayer = L.layerGroup();
+  for (const h of hotels) {
+    const m = L.circleMarker([h.lat, h.lon], {
+      radius: 5, weight: 2, color: '#ffffff',
+      fillColor: '#e34948', fillOpacity: 0.95,
+    });
+    m.bindTooltip(() => hotelTipHtml(h, zoneNames[h.zone] || ''), { sticky: true, className: 'zone-tip', opacity: 1 });
+    hotelMarkers[h.name] = m;
+    hotelLayer.addLayer(m);
+  }
+}
+
+function toggleHotels() {
+  state.hotels = !state.hotels;
+  document.getElementById('hotelBtn').style.outline = state.hotels ? '2px solid var(--accent)' : 'none';
+  if (state.hotels) hotelLayer.addTo(map); else hotelLayer.remove();
+  restyle();
 }
 
 // ---------- 主题 ----------
@@ -306,12 +382,13 @@ function applyTheme(t) {
 
 // ---------- 初始化 ----------
 async function init() {
-  const [zonesRes, statsRes] = await Promise.all([
-    fetch('data/taxi_zones.geojson'), fetch('data/stats.json'),
+  const [zonesRes, statsRes, hotelsRes] = await Promise.all([
+    fetch('data/taxi_zones.geojson'), fetch('data/stats.json'), fetch('data/hotels.json'),
   ]);
   const zones = await zonesRes.json();
   const s = await statsRes.json();
   stats = s.stats; meta = s.meta;
+  hotels = await hotelsRes.json();
 
   const now = nycNow();
   state.dow = now.dow; state.hour = now.hour;
@@ -339,6 +416,12 @@ async function init() {
   document.getElementById('hourSlider').oninput = e => { state.hour = +e.target.value; restyle(); };
   document.querySelectorAll('#metricSeg button').forEach(b =>
     b.onclick = () => { state.metric = b.dataset.m; restyle(); });
+  document.querySelectorAll('#tierSeg button').forEach(b =>
+    b.onclick = () => { state.tier = +b.dataset.t; restyle(); });
+  const zoneNames = {};
+  zones.features.forEach(f => zoneNames[f.properties.id] = `${f.properties.zone} · ${f.properties.borough}`);
+  buildHotelLayer(zoneNames);
+  document.getElementById('hotelBtn').onclick = toggleHotels;
   document.getElementById('nowBtn').onclick = () => {
     const n = nycNow(); state.dow = n.dow; state.hour = n.hour; restyle();
   };
