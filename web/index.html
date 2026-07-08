@@ -45,6 +45,19 @@
   .panel h1 { font-size: 16px; font-weight: 650; }
   .panel .sub { font-size: 12px; color: var(--text-muted); margin: 2px 0 10px; }
 
+  .phead { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+  .phead h1 { flex: 1; white-space: nowrap; }
+  .phead .mini { display: none; font-size: 12px; color: var(--text-secondary); white-space: nowrap; }
+  #collapseBtn {
+    border: 1px solid var(--hairline); background: transparent; color: var(--text-secondary);
+    font: inherit; font-size: 13px; width: 28px; height: 28px; border-radius: 8px;
+    cursor: pointer; flex-shrink: 0; line-height: 1;
+  }
+  #collapseBtn:hover { background: var(--hairline); }
+  .panel.collapsed .pbody { display: none; }
+  .panel.collapsed .phead .mini { display: inline; }
+  .panel.collapsed { width: auto; max-width: calc(100% - 24px); }
+
   .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
   .seg { display: flex; gap: 2px; background: var(--page); border: 1px solid var(--hairline); border-radius: 8px; padding: 2px; }
   .seg button {
@@ -78,6 +91,10 @@
   }
   .top10 li:hover { background: var(--hairline); }
   .top10 .z { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top10 li.hz { align-items: flex-start; }
+  .top10 li.hz .z { white-space: normal; flex: 1; }
+  .top10 li.hz .z b { display: block; font-weight: 600; }
+  .hnames { display: block; font-size: 11px; color: var(--text-muted); line-height: 1.4; }
   .top10 .v { color: var(--text-secondary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .top10 .rank { color: var(--text-muted); width: 16px; flex-shrink: 0; }
 
@@ -106,7 +123,16 @@
     background: var(--page); font-size: 14px; color: var(--text-secondary);
   }
   @media (max-width: 640px) {
-    .panel { width: calc(100% - 24px); max-height: 55%; }
+    .panel { width: calc(100% - 24px); max-height: 62%; padding: 12px 14px; }
+    /* 折叠后地图全屏可见；控制按钮移到左下角避开面板和缩放键 */
+    .toggles { top: auto; bottom: 24px; left: 12px; right: auto; }
+    .toggles button { padding: 8px 12px; font-size: 14px; }
+    /* 更大的触控目标 */
+    .seg button { padding: 7px 10px; font-size: 13px; }
+    .nowbtn { padding: 6px 12px; font-size: 13px; }
+    input[type=range] { height: 28px; }
+    .top10 li { padding: 6px 4px; }
+    .leaflet-control-zoom { display: none; } /* 手机用双指缩放 */
   }
 </style>
 </head>
@@ -114,8 +140,13 @@
 <div id="map"></div>
 <div class="loading" id="loading">正在加载数据…</div>
 
-<div class="panel">
-  <h1>🚕 纽约大单热区</h1>
+<div class="panel" id="panel">
+  <div class="phead" id="phead">
+    <h1>🚕 纽约大单热区</h1>
+    <span class="mini" id="miniInfo"></span>
+    <button id="collapseBtn" title="折叠/展开面板" aria-label="折叠或展开面板">▾</button>
+  </div>
+  <div class="pbody">
   <div class="sub" id="subline">基于 NYC TLC 网约车历史数据</div>
 
   <div class="row">
@@ -159,6 +190,7 @@
   </div>
 
   <div class="foot" id="footNote"></div>
+  </div><!-- /.pbody -->
 </div>
 
 <div class="toggles">
@@ -185,6 +217,7 @@ const MIN_TRIPS = 10; // 样本太少的格子不着色
 
 let stats = null, meta = null, geoLayer = null, map = null;
 let hotels = [], hotelLayer = null, hotelMarkers = {};
+let zoneNameById = {}, zoneLayerById = {};
 let state = { dow: 0, hour: 0, metric: 'bigPerHour', tier: 0, hotels: false, theme: 'light' };
 let tiles = null, breaks = [];
 
@@ -270,21 +303,29 @@ function renderTop10(byZone) {
   const titleEl = document.getElementById('topTitle');
 
   if (state.hotels) {
-    // 酒店模式：按酒店所在区域的当前指标排序
-    titleEl.textContent = '当前时段 Top 15 酒店';
-    const items = hotels
-      .map(h => ({ h, v: byZone[String(h.zone)] }))
+    // 酒店模式：TLC 数据精度到区域级，同区域酒店数值相同，
+    // 因此按「酒店区域」分组排名，列出每片的酒店。
+    titleEl.textContent = '当前时段 Top 酒店区域';
+    const grouped = {};
+    hotels.forEach(h => (grouped[h.zone] ??= []).push(h));
+    const items = Object.entries(grouped)
+      .map(([zid, hs]) => ({ zid, hs, v: byZone[zid] }))
       .filter(it => it.v !== null && it.v !== undefined && it.v > 0)
       .sort((a,b) => b.v - a.v)
-      .slice(0, 15);
-    listEl.innerHTML = items.map((it,i) =>
-      `<li data-i="${i}"><span class="rank">${i+1}</span><span class="z" title="${it.h.name}">${it.h.name}</span><span class="v">${fmt(it.v)}</span></li>`).join('');
+      .slice(0, 8);
+    listEl.innerHTML = items.map((it,i) => {
+      const names = it.hs.slice(0,3).map(h => h.name).join('、');
+      const more = it.hs.length > 3 ? ` 等${it.hs.length}家` : '';
+      return `<li data-i="${i}" class="hz"><span class="rank">${i+1}</span>` +
+        `<span class="z"><b>${zoneNameById[it.zid] || it.zid}</b>` +
+        `<span class="hnames">${names}${more}</span></span>` +
+        `<span class="v">${fmt(it.v)}</span></li>`;
+    }).join('');
     listEl.querySelectorAll('li').forEach(li => {
       li.onclick = () => {
         const it = items[+li.dataset.i];
-        map.setView([it.h.lat, it.h.lon], 15);
-        const m = hotelMarkers[it.h.name];
-        if (m) m.openTooltip();
+        const zl = zoneLayerById[it.zid];
+        if (zl) { map.fitBounds(zl.getBounds(), { maxZoom: 14 }); zl.openTooltip(zl.getBounds().getCenter()); }
       };
     });
     return;
@@ -311,6 +352,8 @@ function renderTop10(byZone) {
 
 function renderLabels() {
   const d = METRIC_DEFS[state.metric];
+  document.getElementById('miniInfo').textContent =
+    `${DOW_NAMES[state.dow]} ${String(state.hour).padStart(2,'0')}:00 · ${d.name}`;
   document.getElementById('hourLabel').textContent =
     `${DOW_NAMES[state.dow]} ${String(state.hour).padStart(2,'0')}:00–${String((state.hour+1)%24).padStart(2,'0')}:00`;
   document.querySelectorAll('#dowSeg button').forEach((b,i) => b.classList.toggle('on', i === state.dow));
@@ -395,6 +438,14 @@ async function init() {
 
   map = L.map('map', { zoomControl: false }).setView([40.72, -73.94], 11);
   L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+  // 同一时间只保留一个提示框，避免酒店/区域提示叠在一起
+  let openTipLayer = null;
+  map.on('tooltipopen', e => {
+    const src = e.tooltip._source;
+    if (openTipLayer && openTipLayer !== src) openTipLayer.closeTooltip();
+    openTipLayer = src;
+  });
   tiles = L.tileLayer('', {
     attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: 'abcd', maxZoom: 18,
   }).addTo(map);
@@ -418,15 +469,25 @@ async function init() {
     b.onclick = () => { state.metric = b.dataset.m; restyle(); });
   document.querySelectorAll('#tierSeg button').forEach(b =>
     b.onclick = () => { state.tier = +b.dataset.t; restyle(); });
-  const zoneNames = {};
-  zones.features.forEach(f => zoneNames[f.properties.id] = `${f.properties.zone} · ${f.properties.borough}`);
-  buildHotelLayer(zoneNames);
+  zones.features.forEach(f => zoneNameById[f.properties.id] = `${f.properties.zone} · ${f.properties.borough}`);
+  geoLayer.eachLayer(l => zoneLayerById[l.feature.properties.id] = l);
+  buildHotelLayer(zoneNameById);
   document.getElementById('hotelBtn').onclick = toggleHotels;
   document.getElementById('nowBtn').onclick = () => {
     const n = nycNow(); state.dow = n.dow; state.hour = n.hour; restyle();
   };
   document.getElementById('themeBtn').onclick = () =>
     applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+
+  // 面板折叠：点击头部任意位置切换；手机端默认收起，方便看地图
+  const panel = document.getElementById('panel');
+  const setCollapsed = c => {
+    panel.classList.toggle('collapsed', c);
+    document.getElementById('collapseBtn').textContent = c ? '▸' : '▾';
+  };
+  document.getElementById('phead').onclick = () =>
+    setCollapsed(!panel.classList.contains('collapsed'));
+  if (window.innerWidth <= 640) setCollapsed(true);
 
   document.getElementById('subline').textContent =
     `数据月份 ${meta.month} · 默认显示纽约当前时段`;
