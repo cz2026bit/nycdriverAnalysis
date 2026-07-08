@@ -97,6 +97,28 @@
   .hnames { display: block; font-size: 11px; color: var(--text-muted); line-height: 1.4; }
   .dist { display: block; font-size: 11px; color: var(--text-muted); text-align: right; }
   .toggles button.active { outline: 2px solid var(--accent); }
+
+  .picker { margin-top: 10px; border-top: 1px solid var(--hairline); padding-top: 8px; }
+  .picker h2 { font-size: 12px; font-weight: 650; color: var(--text-secondary); margin-bottom: 6px; }
+  .prow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; }
+  .prow label { color: var(--text-secondary); }
+  .prow input {
+    flex: 1; min-width: 0; font: inherit; padding: 5px 8px; border-radius: 8px;
+    border: 1px solid var(--hairline); background: var(--page); color: var(--text-primary);
+  }
+  .pbtn {
+    border: 1px solid var(--hairline); background: transparent; color: var(--accent);
+    font: inherit; font-size: 12px; padding: 4px 10px; border-radius: 8px; cursor: pointer; flex-shrink: 0;
+  }
+  .pbtn.picking { outline: 2px solid var(--accent); }
+  .pval { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #pickResult { margin-top: 8px; }
+  .verdict { border-radius: 10px; padding: 8px 10px; font-size: 12px; border: 1px solid var(--border); }
+  .verdict .vhead { font-size: 14px; font-weight: 650; margin-bottom: 4px; }
+  .verdict table { border-collapse: collapse; width: 100%; }
+  .verdict td { padding: 1px 0; color: var(--text-secondary); }
+  .verdict td.v { text-align: right; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .verdict .note { margin-top: 4px; color: var(--text-muted); font-size: 11px; line-height: 1.4; }
   .top10 .v { color: var(--text-secondary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .top10 .rank { color: var(--text-muted); width: 16px; flex-shrink: 0; }
 
@@ -186,6 +208,23 @@
     <div class="lab"><span id="legendLo"></span><span id="legendHi"></span></div>
   </div>
 
+  <div class="picker" id="pickPanel" hidden>
+    <h2>🧮 挑单参考</h2>
+    <div class="prow">
+      <label for="fareInput">订单显示收入 $</label>
+      <input type="number" id="fareInput" min="0" step="1" placeholder="如 38" inputmode="decimal">
+    </div>
+    <div class="prow">
+      <button class="pbtn" id="origBtn">📍 起点</button>
+      <span class="pval" id="origName">未设置</span>
+    </div>
+    <div class="prow">
+      <button class="pbtn" id="destBtn">🎯 目的地</button>
+      <span class="pval" id="destName">点按钮后在地图上选</span>
+    </div>
+    <div id="pickResult"></div>
+  </div>
+
   <div class="top10">
     <h2 id="topTitle">当前时段 Top 10 区域</h2>
     <ol id="topList"></ol>
@@ -196,6 +235,7 @@
 </div>
 
 <div class="toggles">
+  <button id="pickToggle" title="挑单参考">🧮 挑单</button>
   <button id="locBtn" title="显示我的位置">📍 定位</button>
   <button id="hotelBtn" title="显示/隐藏酒店">🏨 酒店</button>
   <button id="themeBtn" title="切换深浅模式">🌙</button>
@@ -432,6 +472,127 @@ function toggleHotels() {
   restyle();
 }
 
+// ---------- 挑单参考 ----------
+let zonesGeoFC = null, zoneBoroughById = {};
+let pick = { on: false, mode: null, fare: null, orig: null, dest: null };
+let hlOrig = null, hlDest = null;
+
+function pointInRing(x, y, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function zoneAt(lat, lng) {
+  for (const f of zonesGeoFC.features) {
+    for (const poly of f.geometry.coordinates) {
+      if (pointInRing(lng, lat, poly[0])) return f.properties.id;
+    }
+  }
+  return null;
+}
+
+// 粗略车速模型（mph）：高峰更慢，曼哈顿更慢
+function estSpeedMph(hour, bOrig, bDest) {
+  const peak = (hour >= 7 && hour < 10) || (hour >= 16 && hour < 19);
+  let mph = peak ? 11 : 14;
+  const m1 = bOrig === 'Manhattan', m2 = bDest === 'Manhattan';
+  if (!m1 && !m2) mph += 5; else if (!m1 || !m2) mph += 2;
+  return mph;
+}
+
+// 落点区域在到达时刻的热度：热/中/冷（按当时段全市三分位）
+function destOutlook(zid, dow, hour) {
+  const vals = [];
+  for (const z in stats) {
+    const v = zoneValue(z, dow, hour, 'bigPerHour');
+    if (v !== null && v > 0) vals.push(v);
+  }
+  vals.sort((a, b) => a - b);
+  const v = zoneValue(String(zid), dow, hour, 'bigPerHour');
+  if (v === null || !vals.length) return { level: 0, v: v ?? 0 };
+  if (v >= vals[Math.floor(vals.length * 2 / 3)]) return { level: 2, v };
+  if (v >= vals[Math.floor(vals.length / 3)]) return { level: 1, v };
+  return { level: 0, v };
+}
+
+function setHighlight(which, zid) {
+  const old = which === 'orig' ? hlOrig : hlDest;
+  if (old) old.remove();
+  let layer = null;
+  if (zid !== null) {
+    const f = zonesGeoFC.features.find(f => f.properties.id === zid);
+    layer = L.geoJSON(f, { style: {
+      color: which === 'orig' ? '#1baf7a' : '#e34948',
+      weight: 3, dashArray: '6 4', fill: false, interactive: false,
+    }}).addTo(map);
+  }
+  if (which === 'orig') hlOrig = layer; else hlDest = layer;
+}
+
+function renderPick() {
+  document.getElementById('origName').textContent = pick.orig !== null
+    ? zoneNameById[pick.orig] : (pick.mode === 'orig' ? '在地图上点选…' : '未设置');
+  document.getElementById('destName').textContent = pick.dest !== null
+    ? zoneNameById[pick.dest] : (pick.mode === 'dest' ? '在地图上点选…' : '点按钮后在地图上选');
+  document.getElementById('origBtn').classList.toggle('picking', pick.mode === 'orig');
+  document.getElementById('destBtn').classList.toggle('picking', pick.mode === 'dest');
+  const out = document.getElementById('pickResult');
+
+  if (pick.fare === null || pick.orig === null || pick.dest === null) {
+    out.innerHTML = '<div class="verdict"><span class="note">填入订单收入、起点和目的地后自动评估。起点开定位后自动填。</span></div>';
+    return;
+  }
+
+  const co = zoneCenterById[pick.orig], cd = zoneCenterById[pick.dest];
+  const straightMi = haversine(co.lat, co.lng, cd.lat, cd.lng) / 1609.34;
+  const mi = straightMi * 1.35; // 实际路线弯折系数
+  const mph = estSpeedMph(state.hour, zoneBoroughById[pick.orig], zoneBoroughById[pick.dest]);
+  const min = mi / mph * 60 + 5; // +5 分钟接驾等待
+  const rate = pick.fare / min * 60;
+
+  const arrHourRaw = state.hour + Math.round(min / 60);
+  const arrDow = (state.dow + Math.floor(arrHourRaw / 24)) % 7;
+  const arrHour = arrHourRaw % 24;
+  const ol = destOutlook(pick.dest, arrDow, arrHour);
+  const olText = ['❄️ 冷区（可能空驶返程）', '🟡 一般', '🔥 大单热区'][ol.level];
+
+  let head, color;
+  if (rate >= 45 || (rate >= 35 && ol.level === 2)) { head = '✅ 值得接'; color = '#0ca30c'; }
+  else if (rate >= 30 || (rate >= 22 && ol.level === 2)) { head = '⚠️ 边缘单，看你排队情况'; color = '#eda100'; }
+  else { head = '❌ 不划算'; color = '#d03b3b'; }
+
+  out.innerHTML = `<div class="verdict" style="border-left: 4px solid ${color}">
+    <div class="vhead">${head}</div>
+    <table>
+      <tr><td>预估行程</td><td class="v">${mi.toFixed(1)} mi · 约 ${Math.round(min)} 分钟</td></tr>
+      <tr><td>本单时薪</td><td class="v">$${rate.toFixed(0)}/小时</td></tr>
+      <tr><td>落点行情（${DOW_NAMES[arrDow]} ${String(arrHour).padStart(2,'0')}:00）</td><td class="v">${olText}</td></tr>
+      <tr><td>落点每小时大单数</td><td class="v">${ol.v.toFixed(1)} 单</td></tr>
+    </table>
+    <div class="note">时薪按直线距离×1.35、${mph} mph 车速 + 5 分钟接驾估算，仅供参考；不含你到接驾点的距离。</div>
+  </div>`;
+}
+
+function togglePick() {
+  pick.on = !pick.on;
+  document.getElementById('pickPanel').hidden = !pick.on;
+  document.getElementById('pickToggle').classList.toggle('active', pick.on);
+  if (pick.on) {
+    // 展开主面板；有定位时自动填起点
+    document.getElementById('panel').classList.remove('collapsed');
+    if (userPos && pick.orig === null) pick.orig = zoneAt(userPos.lat, userPos.lng);
+    if (pick.dest === null) pick.mode = 'dest';
+    renderPick();
+  } else {
+    pick.mode = null;
+    setHighlight('orig', null); setHighlight('dest', null);
+  }
+}
+
 // ---------- 我的位置 ----------
 function stopLocate() {
   if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
@@ -516,6 +677,14 @@ async function init() {
       l.bindTooltip(() => tipHtml(f.properties), { sticky: true, className: 'zone-tip', opacity: 1 });
       l.on('mouseover', () => l.setStyle({ weight: 2 }));
       l.on('mouseout', () => l.setStyle({ weight: 0.7 }));
+      l.on('click', () => {
+        if (!pick.on || !pick.mode) return;
+        pick[pick.mode] = f.properties.id;
+        setHighlight(pick.mode, f.properties.id);
+        // 选完起点自动切到选目的地；选完目的地结束选择模式
+        pick.mode = pick.mode === 'orig' && pick.dest === null ? 'dest' : null;
+        renderPick();
+      });
     },
   }).addTo(map);
 
@@ -529,7 +698,11 @@ async function init() {
     b.onclick = () => { state.metric = b.dataset.m; restyle(); });
   document.querySelectorAll('#tierSeg button').forEach(b =>
     b.onclick = () => { state.tier = +b.dataset.t; restyle(); });
-  zones.features.forEach(f => zoneNameById[f.properties.id] = `${f.properties.zone} · ${f.properties.borough}`);
+  zonesGeoFC = zones;
+  zones.features.forEach(f => {
+    zoneNameById[f.properties.id] = `${f.properties.zone} · ${f.properties.borough}`;
+    zoneBoroughById[f.properties.id] = f.properties.borough;
+  });
   geoLayer.eachLayer(l => {
     const zid = l.feature.properties.id;
     zoneLayerById[zid] = l;
@@ -538,6 +711,20 @@ async function init() {
   buildHotelLayer(zoneNameById);
   document.getElementById('hotelBtn').onclick = toggleHotels;
   document.getElementById('locBtn').onclick = toggleLocate;
+  document.getElementById('pickToggle').onclick = togglePick;
+  document.getElementById('fareInput').oninput = e => {
+    const v = parseFloat(e.target.value);
+    pick.fare = isNaN(v) || v <= 0 ? null : v;
+    renderPick();
+  };
+  document.getElementById('origBtn').onclick = () => {
+    if (userPos) {
+      const z = zoneAt(userPos.lat, userPos.lng);
+      if (z !== null) { pick.orig = z; setHighlight('orig', z); pick.mode = pick.dest === null ? 'dest' : null; renderPick(); return; }
+    }
+    pick.mode = 'orig'; renderPick();
+  };
+  document.getElementById('destBtn').onclick = () => { pick.mode = 'dest'; renderPick(); };
   document.getElementById('nowBtn').onclick = () => {
     const n = nycNow(); state.dow = n.dow; state.hour = n.hour; restyle();
   };
