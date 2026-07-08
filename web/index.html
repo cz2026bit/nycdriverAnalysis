@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>纽约大单热区地图</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🚕</text></svg>">
+<link rel="stylesheet" href="lib/leaflet.css">
+<style>
+  :root {
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted: #898781;
+    --hairline: #e1e0d9;
+    --border: rgba(11,11,11,0.10);
+    --accent: #2a78d6;
+  }
+  :root[data-theme="dark"] {
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --hairline: #2c2c2a;
+    --border: rgba(255,255,255,0.12);
+    --accent: #3987e5;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+    background: var(--page); color: var(--text-primary);
+  }
+  #map { position: absolute; inset: 0; background: var(--page); }
+
+  .panel {
+    position: absolute; top: 12px; left: 12px; z-index: 1000;
+    width: 320px; max-height: calc(100% - 24px); overflow-y: auto;
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+  }
+  .panel h1 { font-size: 16px; font-weight: 650; }
+  .panel .sub { font-size: 12px; color: var(--text-muted); margin: 2px 0 10px; }
+
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .seg { display: flex; gap: 2px; background: var(--page); border: 1px solid var(--hairline); border-radius: 8px; padding: 2px; }
+  .seg button {
+    border: 0; background: transparent; color: var(--text-secondary);
+    font: inherit; font-size: 12px; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+  }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .seg button:hover:not(.on) { background: var(--hairline); }
+
+  label.small { font-size: 12px; color: var(--text-secondary); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .hourline { display: flex; justify-content: space-between; align-items: baseline; }
+  .hourline .val { font-size: 14px; font-weight: 650; }
+  .nowbtn {
+    border: 1px solid var(--hairline); background: transparent; color: var(--accent);
+    font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; cursor: pointer;
+  }
+  .nowbtn:hover { background: var(--hairline); }
+
+  .legend { margin: 10px 0 4px; }
+  .legend .bins { display: flex; height: 10px; border-radius: 5px; overflow: hidden; }
+  .legend .bins div { flex: 1; }
+  .legend .lab { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+
+  .top10 { margin-top: 10px; border-top: 1px solid var(--hairline); padding-top: 8px; }
+  .top10 h2 { font-size: 12px; font-weight: 650; color: var(--text-secondary); margin-bottom: 6px; }
+  .top10 ol { list-style: none; font-size: 12px; }
+  .top10 li {
+    display: flex; justify-content: space-between; gap: 8px;
+    padding: 3px 4px; border-radius: 6px; cursor: pointer;
+  }
+  .top10 li:hover { background: var(--hairline); }
+  .top10 .z { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .top10 .v { color: var(--text-secondary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
+  .top10 .rank { color: var(--text-muted); width: 16px; flex-shrink: 0; }
+
+  .foot { margin-top: 10px; font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+
+  .toggles { position: absolute; top: 12px; right: 12px; z-index: 1000; display: flex; gap: 8px; }
+  .toggles button {
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-primary);
+    font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 10px; cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.10);
+  }
+
+  .leaflet-tooltip.zone-tip {
+    background: var(--surface-1); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.15); padding: 8px 10px;
+  }
+  .zone-tip b { font-size: 13px; }
+  .zone-tip .boro { color: var(--text-muted); font-size: 11px; margin-bottom: 4px; }
+  .zone-tip table { font-size: 12px; border-collapse: collapse; }
+  .zone-tip td { padding: 1px 0; color: var(--text-secondary); }
+  .zone-tip td.v { text-align: right; padding-left: 12px; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+
+  .loading {
+    position: absolute; inset: 0; z-index: 2000; display: flex; align-items: center; justify-content: center;
+    background: var(--page); font-size: 14px; color: var(--text-secondary);
+  }
+  @media (max-width: 640px) {
+    .panel { width: calc(100% - 24px); max-height: 55%; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div class="loading" id="loading">正在加载数据…</div>
+
+<div class="panel">
+  <h1>🚕 纽约大单热区</h1>
+  <div class="sub" id="subline">基于 NYC TLC 网约车历史数据</div>
+
+  <div class="row">
+    <div class="seg" id="dowSeg"></div>
+  </div>
+
+  <div class="hourline">
+    <label class="small" for="hourSlider">时段</label>
+    <span class="val" id="hourLabel"></span>
+  </div>
+  <input type="range" id="hourSlider" min="0" max="23" step="1">
+  <div class="row" style="justify-content: space-between; margin-top: 6px;">
+    <button class="nowbtn" id="nowBtn">⏱ 回到当前时间（纽约）</button>
+  </div>
+
+  <div class="row">
+    <div class="seg" id="metricSeg">
+      <button data-m="bigPerHour" class="on">每小时大单数</button>
+      <button data-m="bigProb">大单概率</button>
+      <button data-m="avg">平均收入</button>
+    </div>
+  </div>
+
+  <div class="legend">
+    <div class="bins" id="legendBins"></div>
+    <div class="lab"><span id="legendLo"></span><span id="legendHi"></span></div>
+  </div>
+
+  <div class="top10">
+    <h2>当前时段 Top 10 区域</h2>
+    <ol id="topList"></ol>
+  </div>
+
+  <div class="foot" id="footNote"></div>
+</div>
+
+<div class="toggles">
+  <button id="themeBtn" title="切换深浅模式">🌙</button>
+</div>
+
+<script src="lib/leaflet.js"></script>
+<script>
+// ---------- 顺序色阶（来自已校验的参考调色板：单一蓝色，浅→深） ----------
+const RAMP_LIGHT = ['#cde2fb','#9ec5f4','#6da7ec','#3987e5','#256abf','#1c5cab','#0d366b'];
+// 深色模式：近零值向深色地面退隐，高值变亮
+const RAMP_DARK  = ['#0d366b','#184f95','#1c5cab','#256abf','#2a78d6','#5598e7','#9ec5f4'];
+const NO_DATA_LIGHT = '#eceae4', NO_DATA_DARK = '#242423';
+
+const DOW_NAMES = ['周一','周二','周三','周四','周五','周六','周日'];
+const METRIC_DEFS = {
+  bigPerHour: { name: '每小时大单数', fmt: v => v.toFixed(1) + ' 单', desc: '该时段该区域平均每小时产生的大单数量（供给热度）' },
+  bigProb:    { name: '大单概率',     fmt: v => (v*100).toFixed(0) + '%', desc: '在该区域接到的订单中属于大单的比例' },
+  avg:        { name: '平均收入',     fmt: v => '$' + v.toFixed(0), desc: '该时段该区域每单司机平均到手收入（含小费）' },
+};
+const MIN_TRIPS = 10; // 样本太少的格子不着色
+
+let stats = null, meta = null, geoLayer = null, map = null;
+let state = { dow: 0, hour: 0, metric: 'bigPerHour', theme: 'light' };
+let tiles = null, breaks = [];
+
+// ---------- 纽约当前时间 ----------
+function nycNow() {
+  const p = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', weekday: 'short', hour: 'numeric', hour12: false }).formatToParts(new Date());
+  const wd = { Mon:0, Tue:1, Wed:2, Thu:3, Fri:4, Sat:5, Sun:6 }[p.find(x => x.type==='weekday').value];
+  const hr = parseInt(p.find(x => x.type==='hour').value, 10) % 24;
+  return { dow: wd, hour: hr };
+}
+
+// ---------- 指标计算 ----------
+function zoneValue(zid, dow, hour, metric) {
+  const g = stats[zid];
+  if (!g) return null;
+  const [n, avg, big] = g[dow][hour];
+  if (n < MIN_TRIPS) return null;
+  if (metric === 'bigProb') return big / n;
+  if (metric === 'avg') return avg;
+  const days = meta.days_per_dow[dow] || 1;
+  return big / days;
+}
+
+function computeSlice() {
+  const vals = [];
+  const byZone = {};
+  for (const zid in stats) {
+    const v = zoneValue(zid, state.dow, state.hour, state.metric);
+    byZone[zid] = v;
+    if (v !== null && v > 0) vals.push(v);
+  }
+  vals.sort((a,b) => a-b);
+  // 7 档分位数分箱（当前时段内相对比较）
+  breaks = [];
+  for (let i = 1; i < 7; i++) breaks.push(vals[Math.floor(vals.length * i / 7)] ?? 0);
+  return byZone;
+}
+
+function colorFor(v) {
+  const ramp = state.theme === 'dark' ? RAMP_DARK : RAMP_LIGHT;
+  if (v === null || v <= 0) return state.theme === 'dark' ? NO_DATA_DARK : NO_DATA_LIGHT;
+  let i = 0;
+  while (i < breaks.length && v >= breaks[i]) i++;
+  return ramp[i];
+}
+
+// ---------- 渲染 ----------
+function restyle() {
+  const byZone = computeSlice();
+  geoLayer.eachLayer(l => {
+    const zid = String(l.feature.properties.id);
+    const v = byZone[zid] ?? null;
+    l.setStyle({
+      fillColor: colorFor(v),
+      fillOpacity: 0.72,
+      color: state.theme === 'dark' ? 'rgba(255,255,255,0.25)' : 'rgba(11,11,11,0.22)',
+      weight: 0.7,
+    });
+  });
+  renderLegend();
+  renderTop10(byZone);
+  renderLabels();
+}
+
+function renderLegend() {
+  const ramp = state.theme === 'dark' ? RAMP_DARK : RAMP_LIGHT;
+  const el = document.getElementById('legendBins');
+  el.innerHTML = ramp.map(c => `<div style="background:${c}"></div>`).join('');
+  const fmt = METRIC_DEFS[state.metric].fmt;
+  document.getElementById('legendLo').textContent = '低';
+  document.getElementById('legendHi').textContent = breaks.length ? '高（≥' + fmt(breaks[breaks.length-1]) + '）' : '高';
+}
+
+function renderTop10(byZone) {
+  const items = [];
+  geoLayer.eachLayer(l => {
+    const p = l.feature.properties, v = byZone[String(p.id)];
+    if (v !== null && v !== undefined && v > 0) items.push({ v, p, l });
+  });
+  items.sort((a,b) => b.v - a.v);
+  const fmt = METRIC_DEFS[state.metric].fmt;
+  document.getElementById('topList').innerHTML = items.slice(0,10).map((it,i) =>
+    `<li data-i="${i}"><span class="rank">${i+1}</span><span class="z">${it.p.zone}</span><span class="v">${fmt(it.v)}</span></li>`).join('');
+  const top = items.slice(0,10);
+  document.querySelectorAll('#topList li').forEach(li => {
+    li.onclick = () => {
+      const it = top[+li.dataset.i];
+      map.fitBounds(it.l.getBounds(), { maxZoom: 13 });
+      it.l.openTooltip(it.l.getBounds().getCenter());
+    };
+  });
+}
+
+function renderLabels() {
+  const d = METRIC_DEFS[state.metric];
+  document.getElementById('hourLabel').textContent =
+    `${DOW_NAMES[state.dow]} ${String(state.hour).padStart(2,'0')}:00–${String((state.hour+1)%24).padStart(2,'0')}:00`;
+  document.querySelectorAll('#dowSeg button').forEach((b,i) => b.classList.toggle('on', i === state.dow));
+  document.querySelectorAll('#metricSeg button').forEach(b => b.classList.toggle('on', b.dataset.m === state.metric));
+  document.getElementById('hourSlider').value = state.hour;
+  document.getElementById('footNote').innerHTML =
+    `<b>${d.name}</b>：${d.desc}。<br>大单 = 司机单笔到手收入（车费+小费）≥ $${meta.threshold}` +
+    `（全市前10%）。数据：NYC TLC 高频网约车行程记录 ${meta.month}，共 ${(meta.total_trips/1e6).toFixed(1)}M 单。灰色 = 该时段样本不足。`;
+}
+
+function tipHtml(props) {
+  const g = stats[String(props.id)];
+  if (!g) return `<b>${props.zone}</b><div class="boro">${props.borough} · 无数据</div>`;
+  const [n, avg, big] = g[state.dow][state.hour];
+  const days = meta.days_per_dow[state.dow] || 1;
+  const rows = n >= MIN_TRIPS ? `
+    <table>
+      <tr><td>每小时订单量</td><td class="v">${(n/days).toFixed(0)} 单</td></tr>
+      <tr><td>每小时大单数</td><td class="v">${(big/days).toFixed(1)} 单</td></tr>
+      <tr><td>大单概率</td><td class="v">${(big/n*100).toFixed(0)}%</td></tr>
+      <tr><td>平均每单收入</td><td class="v">$${avg.toFixed(2)}</td></tr>
+    </table>` : `<div style="font-size:12px;color:var(--text-muted)">该时段样本不足</div>`;
+  return `<b>${props.zone}</b><div class="boro">${props.borough} · ${DOW_NAMES[state.dow]} ${String(state.hour).padStart(2,'0')}:00</div>${rows}`;
+}
+
+// ---------- 主题 ----------
+function applyTheme(t) {
+  state.theme = t;
+  document.documentElement.dataset.theme = t;
+  document.getElementById('themeBtn').textContent = t === 'dark' ? '☀️' : '🌙';
+  if (tiles) tiles.setUrl(t === 'dark'
+    ? 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+    : 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png');
+  if (geoLayer) restyle();
+}
+
+// ---------- 初始化 ----------
+async function init() {
+  const [zonesRes, statsRes] = await Promise.all([
+    fetch('data/taxi_zones.geojson'), fetch('data/stats.json'),
+  ]);
+  const zones = await zonesRes.json();
+  const s = await statsRes.json();
+  stats = s.stats; meta = s.meta;
+
+  const now = nycNow();
+  state.dow = now.dow; state.hour = now.hour;
+
+  map = L.map('map', { zoomControl: false }).setView([40.72, -73.94], 11);
+  L.control.zoom({ position: 'bottomright' }).addTo(map);
+  tiles = L.tileLayer('', {
+    attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: 'abcd', maxZoom: 18,
+  }).addTo(map);
+
+  geoLayer = L.geoJSON(zones, {
+    style: { weight: 0.7, fillOpacity: 0.72 },
+    onEachFeature: (f, l) => {
+      l.bindTooltip(() => tipHtml(f.properties), { sticky: true, className: 'zone-tip', opacity: 1 });
+      l.on('mouseover', () => l.setStyle({ weight: 2 }));
+      l.on('mouseout', () => l.setStyle({ weight: 0.7 }));
+    },
+  }).addTo(map);
+
+  // 控件
+  document.getElementById('dowSeg').innerHTML =
+    DOW_NAMES.map((n,i) => `<button data-d="${i}">${n.replace('周','')}</button>`).join('');
+  document.querySelectorAll('#dowSeg button').forEach(b =>
+    b.onclick = () => { state.dow = +b.dataset.d; restyle(); });
+  document.getElementById('hourSlider').oninput = e => { state.hour = +e.target.value; restyle(); };
+  document.querySelectorAll('#metricSeg button').forEach(b =>
+    b.onclick = () => { state.metric = b.dataset.m; restyle(); });
+  document.getElementById('nowBtn').onclick = () => {
+    const n = nycNow(); state.dow = n.dow; state.hour = n.hour; restyle();
+  };
+  document.getElementById('themeBtn').onclick = () =>
+    applyTheme(state.theme === 'dark' ? 'light' : 'dark');
+
+  document.getElementById('subline').textContent =
+    `数据月份 ${meta.month} · 默认显示纽约当前时段`;
+
+  applyTheme(matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  document.getElementById('loading').remove();
+}
+init().catch(e => {
+  document.getElementById('loading').textContent = '数据加载失败：' + e.message;
+});
+</script>
+</body>
+</html>
