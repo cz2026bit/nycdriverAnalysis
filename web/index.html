@@ -95,6 +95,8 @@
   .top10 li.hz .z { white-space: normal; flex: 1; }
   .top10 li.hz .z b { display: block; font-weight: 600; }
   .hnames { display: block; font-size: 11px; color: var(--text-muted); line-height: 1.4; }
+  .dist { display: block; font-size: 11px; color: var(--text-muted); text-align: right; }
+  .toggles button.active { outline: 2px solid var(--accent); }
   .top10 .v { color: var(--text-secondary); font-variant-numeric: tabular-nums; flex-shrink: 0; }
   .top10 .rank { color: var(--text-muted); width: 16px; flex-shrink: 0; }
 
@@ -194,6 +196,7 @@
 </div>
 
 <div class="toggles">
+  <button id="locBtn" title="显示我的位置">📍 定位</button>
   <button id="hotelBtn" title="显示/隐藏酒店">🏨 酒店</button>
   <button id="themeBtn" title="切换深浅模式">🌙</button>
 </div>
@@ -217,7 +220,24 @@ const MIN_TRIPS = 10; // 样本太少的格子不着色
 
 let stats = null, meta = null, geoLayer = null, map = null;
 let hotels = [], hotelLayer = null, hotelMarkers = {};
-let zoneNameById = {}, zoneLayerById = {};
+let zoneNameById = {}, zoneLayerById = {}, zoneCenterById = {};
+let userPos = null, locMarker = null, accCircle = null, watchId = null;
+
+// 球面距离（米）
+function haversine(lat1, lon1, lat2, lon2) {
+  const R = 6371000, d = Math.PI / 180;
+  const a = Math.sin((lat2-lat1)*d/2)**2 +
+    Math.cos(lat1*d) * Math.cos(lat2*d) * Math.sin((lon2-lon1)*d/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function distLabel(zid) {
+  if (!userPos) return '';
+  const c = zoneCenterById[zid];
+  if (!c) return '';
+  const mi = haversine(userPos.lat, userPos.lng, c.lat, c.lng) / 1609.34;
+  return `<span class="dist">距你 ${mi.toFixed(1)} mi</span>`;
+}
 let state = { dow: 0, hour: 0, metric: 'bigPerHour', tier: 0, hotels: false, theme: 'light' };
 let tiles = null, breaks = [];
 
@@ -319,7 +339,7 @@ function renderTop10(byZone) {
       return `<li data-i="${i}" class="hz"><span class="rank">${i+1}</span>` +
         `<span class="z"><b>${zoneNameById[it.zid] || it.zid}</b>` +
         `<span class="hnames">${names}${more}</span></span>` +
-        `<span class="v">${fmt(it.v)}</span></li>`;
+        `<span class="v">${fmt(it.v)}${distLabel(it.zid)}</span></li>`;
     }).join('');
     listEl.querySelectorAll('li').forEach(li => {
       li.onclick = () => {
@@ -339,7 +359,7 @@ function renderTop10(byZone) {
   });
   items.sort((a,b) => b.v - a.v);
   document.getElementById('topList').innerHTML = items.slice(0,10).map((it,i) =>
-    `<li data-i="${i}"><span class="rank">${i+1}</span><span class="z">${it.p.zone}</span><span class="v">${fmt(it.v)}</span></li>`).join('');
+    `<li data-i="${i}"><span class="rank">${i+1}</span><span class="z">${it.p.zone}</span><span class="v">${fmt(it.v)}${distLabel(it.p.id)}</span></li>`).join('');
   const top = items.slice(0,10);
   document.querySelectorAll('#topList li').forEach(li => {
     li.onclick = () => {
@@ -407,9 +427,49 @@ function buildHotelLayer(zoneNames) {
 
 function toggleHotels() {
   state.hotels = !state.hotels;
-  document.getElementById('hotelBtn').style.outline = state.hotels ? '2px solid var(--accent)' : 'none';
+  document.getElementById('hotelBtn').classList.toggle('active', state.hotels);
   if (state.hotels) hotelLayer.addTo(map); else hotelLayer.remove();
   restyle();
+}
+
+// ---------- 我的位置 ----------
+function stopLocate() {
+  if (watchId !== null) { navigator.geolocation.clearWatch(watchId); watchId = null; }
+  if (locMarker) { locMarker.remove(); locMarker = null; }
+  if (accCircle) { accCircle.remove(); accCircle = null; }
+  userPos = null;
+  document.getElementById('locBtn').classList.remove('active');
+  restyle();
+}
+
+function toggleLocate() {
+  if (watchId !== null) { stopLocate(); return; }
+  if (!navigator.geolocation) { alert('此浏览器不支持定位'); return; }
+  const btn = document.getElementById('locBtn');
+  btn.textContent = '📍 定位中…';
+  let first = true;
+  watchId = navigator.geolocation.watchPosition(pos => {
+    userPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    btn.textContent = '📍 定位';
+    btn.classList.add('active');
+    if (!locMarker) {
+      locMarker = L.circleMarker(userPos, {
+        radius: 8, weight: 3, color: '#ffffff', fillColor: '#2a78d6', fillOpacity: 1,
+      }).addTo(map).bindTooltip('你的位置', { className: 'zone-tip' });
+      accCircle = L.circle(userPos, {
+        radius: pos.coords.accuracy, weight: 0, fillColor: '#2a78d6', fillOpacity: 0.12, interactive: false,
+      }).addTo(map);
+    } else {
+      locMarker.setLatLng(userPos);
+      accCircle.setLatLng(userPos).setRadius(pos.coords.accuracy);
+    }
+    if (first) { map.setView(userPos, Math.max(map.getZoom(), 12)); first = false; }
+    restyle(); // 刷新榜单距离
+  }, err => {
+    btn.textContent = '📍 定位';
+    watchId = null;
+    alert('定位失败：' + (err.code === 1 ? '请在浏览器设置中允许位置权限' : err.message));
+  }, { enableHighAccuracy: true, maximumAge: 30000 });
 }
 
 // ---------- 主题 ----------
@@ -470,9 +530,14 @@ async function init() {
   document.querySelectorAll('#tierSeg button').forEach(b =>
     b.onclick = () => { state.tier = +b.dataset.t; restyle(); });
   zones.features.forEach(f => zoneNameById[f.properties.id] = `${f.properties.zone} · ${f.properties.borough}`);
-  geoLayer.eachLayer(l => zoneLayerById[l.feature.properties.id] = l);
+  geoLayer.eachLayer(l => {
+    const zid = l.feature.properties.id;
+    zoneLayerById[zid] = l;
+    zoneCenterById[zid] = l.getBounds().getCenter();
+  });
   buildHotelLayer(zoneNameById);
   document.getElementById('hotelBtn').onclick = toggleHotels;
+  document.getElementById('locBtn').onclick = toggleLocate;
   document.getElementById('nowBtn').onclick = () => {
     const n = nycNow(); state.dow = n.dow; state.hour = n.hour; restyle();
   };
